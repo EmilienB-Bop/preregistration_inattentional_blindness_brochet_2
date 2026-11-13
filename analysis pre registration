@@ -1,0 +1,770 @@
+# ==============================================================================
+# PIPELINE D'ANALYSE REPRODUCTIBLE — ÉTUDE 2 (BEHAVIOR RESEARCH METHODS)
+# Benchmarking Dynamic Inattentional Blindness on the Web
+# Auteurs : Émilien Brochet, Julien Tardieu, Céline Lemercier
+# ==============================================================================
+
+# ─── 0. CHARGEMENT DES PACKAGES ──────────────────────────────────────────────
+required_packages <- c(
+  "jsonlite", "tidyverse", "lme4", "lmerTest", "emmeans", "effectsize",
+  "BayesFactor", "broom", "broom.mixed", "multiverse", "ggplot2",
+  "patchwork", "ggalluvial", "ggridges", "scales", "knitr"
+)
+
+new_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
+if (length(new_packages)) install.packages(new_packages)
+
+suppressPackageStartupMessages({
+  library(jsonlite)
+  library(tidyverse)
+  library(lme4)
+  library(lmerTest)
+  library(emmeans)
+  library(effectsize)
+  library(BayesFactor)
+  library(broom)
+  library(broom.mixed)
+  library(multiverse)
+  library(ggplot2)
+  library(patchwork)
+  library(ggalluvial)
+  library(ggridges)
+  library(scales)
+  library(knitr)
+})
+
+set.seed(20260218) # Graine reproductible (avis CER 2026_1242)
+
+# Paramètres globaux d'exécution
+USE_SYNTHETIC_DATA <- TRUE   # Passer à FALSE pour charger un export JSON Firebase réel
+FIREBASE_JSON_PATH <- "open-science-experiment-default-rtdb-export.json"
+N_SYNTHETIC        <- 3200   # Taille cible de collecte brute (Section 5 du pré-enregistrement)
+
+# ==============================================================================
+# 1. GÉNÉRATEUR DE DONNÉES SYNTHÉTIQUES (FIDÈLE AU SCHÉMA FIREBASE / JSPSYCH)
+# ==============================================================================
+generate_synthetic_firebase_export <- function(n_subjects = 3200) {
+  variants_df <- tribble(
+    ~variant,                 ~has_unexpected, ~us_shape,  ~us_color, ~us_size_mode, ~salience_boost,
+    "none",                   FALSE,           "circle",   "black",   "fixed",       0.00,
+    "circle_black_fixed",     TRUE,            "circle",   "black",   "fixed",       0.00,
+    "circle_black_pulsing",   TRUE,            "circle",   "black",   "pulsing",     0.45,
+    "circle_red_fixed",       TRUE,            "circle",   "red",     "fixed",       0.85,
+    "circle_red_pulsing",     TRUE,            "circle",   "red",     "pulsing",     1.20,
+    "triangle_black_fixed",   TRUE,            "triangle", "black",   "fixed",       0.55,
+    "triangle_black_pulsing", TRUE,            "triangle", "black",   "pulsing",     0.95,
+    "triangle_red_fixed",     TRUE,            "triangle", "red",     "fixed",       1.30,
+    "triangle_red_pulsing",   TRUE,            "triangle", "red",     "pulsing",     1.65
+  )
+  
+  export_list <- vector("list", n_subjects)
+  names(export_list) <- paste0("sub_", 1790000000000 + seq_len(n_subjects), "_", sprintf("%05d", seq_len(n_subjects)))
+  
+  for (i in seq_len(n_subjects)) {
+    sub_id <- names(export_list)[i]
+    v_row  <- variants_df[sample(nrow(variants_df), 1), ]
+    spd    <- sample(c("slow", "fast"), 1)
+    u_spd  <- ifelse(spd == "slow", -80, -200)
+    
+    is_bot   <- runif(1) < 0.02
+    ref_rate <- sample(c(60, 60, 60, 59, 61, 120, 144), 1, prob = c(0.75, 0.08, 0.08, 0.02, 0.02, 0.03, 0.02))
+    has_blur <- runif(1) < 0.04
+    age_grp  <- sample(c("Moins de 18 ans", "18-25 ans", "26-35 ans", "36-50 ans", "51 ans et plus"),
+                       1, prob = c(0.01, 0.52, 0.25, 0.14, 0.08))
+    sex_grp  <- sample(c("Femme", "Homme", "Non-binaire", "Préfère ne pas répondre"),
+                       1, prob = c(0.58, 0.38, 0.02, 0.02))
+    prior_kn <- sample(c("Non", "Oui"), 1, prob = c(0.84, 0.16))
+    
+    base_skill <- rbeta(1, 14, 2.2)
+    
+    trials_list <- list()
+    idx <- 1
+    
+    # Essai démographique
+    trials_list[[idx]] <- list(
+      trial_index = idx,
+      subject_id = sub_id,
+      variant = v_row$variant,
+      us_shape = v_row$us_shape,
+      us_color = v_row$us_color,
+      us_size_mode = v_row$us_size_mode,
+      has_unexpected = v_row$has_unexpected,
+      speedcondition = spd,
+      unexpected_speed_px = u_spd,
+      measured_refresh_rate = ref_rate,
+      screen_width = 1920,
+      screen_height = 1080,
+      viewport_width = 1920,
+      viewport_height = 1080,
+      fullscreen_viewport_width = 1920,
+      fullscreen_viewport_height = 1080,
+      pixel_ratio = 1,
+      is_bot_detected = is_bot,
+      participant_sex = sex_grp,
+      participant_age = age_grp
+    )
+    idx <- idx + 1
+    
+    # Entraînement (2 essais avec trial_number caractère)
+    for (tr in c("train_1", "train_2")) {
+      true_reb <- rpois(1, 18) + 5
+      rep_reb  <- round(true_reb * rnorm(1, 1, (1 - base_skill) * 0.45))
+      trials_list[[idx]] <- list(
+        trial_index = idx, trial_number = tr, is_training = TRUE,
+        true_rebounds = true_reb, rebounds_fast = true_reb, rebounds_slow = rpois(1, 8) + 2,
+        dropped_frames = rpois(1, 3), total_frames = 1140, dropped_frames_pct = 0.26
+      )
+      idx <- idx + 1
+      trials_list[[idx]] <- list(
+        trial_index = idx, trial_number = tr, question_type = "rebound_count",
+        is_training = TRUE, participant_rebound_count = max(0, rep_reb)
+      )
+      idx <- idx + 1
+    }
+    
+    # 5 Essais expérimentaux (trial_number entier)
+    for (t in 1:5) {
+      true_reb <- rpois(1, 26) + 8
+      cost_penalty <- ifelse(t == 3 && v_row$has_unexpected && spd == "fast", 0.055, 0)
+      noise_sd     <- max(0.03, (1 - base_skill) * 0.45 + cost_penalty)
+      rep_reb      <- round(true_reb * rnorm(1, 1, noise_sd))
+      drop_pct     <- ifelse(runif(1) < 0.02, 7.5, runif(1, 0, 1.2))
+      
+      trials_list[[idx]] <- list(
+        trial_index = idx, trial_number = t, is_training = FALSE,
+        true_rebounds = true_reb, rebounds_fast = true_reb, rebounds_slow = rpois(1, 12) + 3,
+        dropped_frames = round(1740 * drop_pct / 100), total_frames = 1740,
+        dropped_frames_pct = drop_pct
+      )
+      idx <- idx + 1
+      
+      if (t < 5) {
+        trials_list[[idx]] <- list(
+          trial_index = idx, trial_number = t, question_type = "rebound_count",
+          is_training = FALSE, participant_rebound_count = max(0, rep_reb)
+        )
+        idx <- idx + 1
+      }
+      
+      if (t >= 3) {
+        if (!v_row$has_unexpected) {
+          p_det <- ifelse(t == 5, 0.02, 0.03)
+        } else {
+          congr_effect <- ifelse(spd == "fast", 1.15, 0.0)
+          trial_effect <- ifelse(t == 3, 0, ifelse(t == 4, 0.95, 3.80))
+          logit_p      <- -2.35 + congr_effect + v_row$salience_boost + trial_effect
+          p_det        <- plogis(logit_p)
+        }
+        
+        said_yes <- runif(1) < p_det
+        resp_ib  <- ifelse(said_yes, "OUI", "NON")
+        conf_det <- ifelse(said_yes, round(rbeta(1, 6, 2) * 100), round(rbeta(1, 4, 2.5) * 100))
+        
+        gen_feature <- function(true_val, alt_val) {
+          if (!v_row$has_unexpected) {
+            if (!said_yes && runif(1) < 0.85) return("none")
+            return(sample(c(true_val, alt_val), 1))
+          }
+          if (said_yes) {
+            return(ifelse(runif(1) < 0.86, true_val, alt_val))
+          } else {
+            if (runif(1) < 0.72) return("none")
+            return(ifelse(runif(1) < 0.60, true_val, alt_val))
+          }
+        }
+        
+        resp_shape <- gen_feature(v_row$us_shape, ifelse(v_row$us_shape == "circle", "triangle", "circle"))
+        resp_color <- gen_feature(v_row$us_color, ifelse(v_row$us_color == "black", "red", "black"))
+        resp_size  <- gen_feature(v_row$us_size_mode, ifelse(v_row$us_size_mode == "fixed", "pulsing", "fixed"))
+        
+        conf_feat_base <- ifelse(said_yes, 78, 24)
+        
+        trials_list[[idx]] <- list(trial_index = idx, trial_number = t, question_type = "detection_ib", participant_response_ib = resp_ib)
+        idx <- idx + 1
+        trials_list[[idx]] <- list(trial_index = idx, trial_number = t, question_type = "confiance_detection", confidence_detection = conf_det)
+        idx <- idx + 1
+        trials_list[[idx]] <- list(trial_index = idx, trial_number = t, question_type = "forme", participant_response_shape = resp_shape)
+        idx <- idx + 1
+        trials_list[[idx]] <- list(trial_index = idx, trial_number = t, question_type = "confiance_forme", confidence_shape = pmin(100, pmax(0, round(rnorm(1, conf_feat_base, 16)))))
+        idx <- idx + 1
+        trials_list[[idx]] <- list(trial_index = idx, trial_number = t, question_type = "couleur", participant_response_color = resp_color)
+        idx <- idx + 1
+        trials_list[[idx]] <- list(trial_index = idx, trial_number = t, question_type = "confiance_couleur", confidence_color = pmin(100, pmax(0, round(rnorm(1, conf_feat_base + 3, 16)))))
+        idx <- idx + 1
+        trials_list[[idx]] <- list(trial_index = idx, trial_number = t, question_type = "taille", participant_response_size = resp_size)
+        idx <- idx + 1
+        trials_list[[idx]] <- list(trial_index = idx, trial_number = t, question_type = "confiance_taille", confidence_size = pmin(100, pmax(0, round(rnorm(1, conf_feat_base - 4, 16)))))
+        idx <- idx + 1
+      }
+    }
+    
+    trials_list[[idx]] <- list(trial_index = idx, question_type = "prior_knowledge", participant_prior_knowledge = prior_kn)
+    
+    inter_list <- list(list(event = "fullscreenenter", time = 1500))
+    if (has_blur) {
+      inter_list[[2]] <- list(event = "blur", time = 65000, trial = 15)
+    }
+    
+    export_list[[sub_id]] <- list(
+      subject_id = sub_id,
+      is_bot_flag = is_bot,
+      trials = trials_list,
+      interactions = inter_list
+    )
+  }
+  
+  return(list(experiment_data = export_list))
+}
+
+# ==============================================================================
+# 2. PARSING ROBUSTE DU JSON FIREBASE (GESTION DES TYPES MIXTES JSPSYCH)
+# ==============================================================================
+parse_trial_node <- function(tr) {
+  # Ne conserver que les champs scalaires (écarte les objets imbriqués comme 'response')
+  scalars <- tr[vapply(tr, function(x) !is.null(x) && !is.list(x) && length(x) == 1, logical(1))]
+  if (!is.null(scalars$trial_number)) {
+    scalars$trial_number <- as.character(scalars$trial_number)
+  }
+  as_tibble(scalars)
+}
+
+if (USE_SYNTHETIC_DATA) {
+  message("Génération de ", N_SYNTHETIC, " sessions synthétiques...")
+  raw_firebase <- generate_synthetic_firebase_export(N_SYNTHETIC)
+} else {
+  message("Lecture de l'export Firebase : ", FIREBASE_JSON_PATH)
+  raw_firebase <- fromJSON(FIREBASE_JSON_PATH, simplifyVector = FALSE)
+}
+
+exp_nodes <- raw_firebase$experiment_data
+
+parsed_subjects <- map_dfr(names(exp_nodes), function(sid) {
+  node <- exp_nodes[[sid]]
+  if (is.null(node$trials) || length(node$trials) == 0) return(NULL)
+  
+  trials_df <- bind_rows(lapply(node$trials, parse_trial_node))
+  
+  inter_df <- if (!is.null(node$interactions) && length(node$interactions) > 0) {
+    bind_rows(lapply(node$interactions, parse_trial_node))
+  } else {
+    tibble(event = character(), time = numeric())
+  }
+  
+  n_focus_loss <- sum(inter_df$event %in% c("blur", "fullscreenexit"), na.rm = TRUE)
+  
+  # Métadonnées globales du sujet
+  meta <- trials_df %>%
+    summarise(
+      subject_id                  = sid,
+      is_bot_flag                 = isTRUE(node$is_bot_flag) || any(is_bot_detected %in% TRUE, na.rm = TRUE),
+      variant                     = first(na.omit(variant)),
+      has_unexpected              = first(na.omit(has_unexpected)),
+      us_shape                    = first(na.omit(us_shape)),
+      us_color                    = first(na.omit(us_color)),
+      us_size_mode                = first(na.omit(us_size_mode)),
+      speedcondition              = first(na.omit(speedcondition)),
+      unexpected_speed_px         = first(na.omit(unexpected_speed_px)),
+      measured_refresh_rate       = first(na.omit(measured_refresh_rate)),
+      screen_width                = first(na.omit(screen_width)),
+      screen_height               = first(na.omit(screen_height)),
+      viewport_width              = first(na.omit(viewport_width)),
+      viewport_height             = first(na.omit(viewport_height)),
+      fullscreen_viewport_width   = first(na.omit(fullscreen_viewport_width)),
+      fullscreen_viewport_height  = first(na.omit(fullscreen_viewport_height)),
+      pixel_ratio                 = first(na.omit(pixel_ratio)),
+      participant_sex             = first(na.omit(participant_sex)),
+      participant_age             = first(na.omit(participant_age)),
+      participant_prior_knowledge = first(na.omit(participant_prior_knowledge)),
+      n_focus_loss                = n_focus_loss
+    )
+  
+  # Extraction des essais expérimentaux 1 à 5
+  exp_trials <- trials_df %>%
+    filter(trial_number %in% as.character(1:5)) %>%
+    mutate(trial_num = as.integer(trial_number)) %>%
+    group_by(trial_num) %>%
+    summarise(
+      true_rebounds              = first(na.omit(true_rebounds)),
+      rebounds_slow              = first(na.omit(rebounds_slow)),
+      rebounds_fast              = first(na.omit(rebounds_fast)),
+      dropped_frames             = first(na.omit(dropped_frames)),
+      total_frames               = first(na.omit(total_frames)),
+      dropped_frames_pct         = first(na.omit(dropped_frames_pct)),
+      participant_rebound_count  = first(na.omit(participant_rebound_count)),
+      participant_response_ib    = first(na.omit(participant_response_ib)),
+      confidence_detection       = first(na.omit(confidence_detection)),
+      participant_response_shape = first(na.omit(participant_response_shape)),
+      confidence_shape           = first(na.omit(confidence_shape)),
+      participant_response_color = first(na.omit(participant_response_color)),
+      confidence_color           = first(na.omit(confidence_color)),
+      participant_response_size  = first(na.omit(participant_response_size)),
+      confidence_size            = first(na.omit(confidence_size)),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      accuracy_pct = if_else(
+        !is.na(true_rebounds) & true_rebounds > 0 & !is.na(participant_rebound_count),
+        pmax(0, 100 - (abs(participant_rebound_count - true_rebounds) / true_rebounds) * 100),
+        NA_real_
+      )
+    )
+  
+  if (nrow(exp_trials) == 0) return(NULL)
+  bind_cols(meta[rep(1, nrow(exp_trials)), ], exp_trials)
+})
+
+# ==============================================================================
+# 3. PRÉPARATION DES VARIABLES & CRITÈRES D'EXCLUSION PRÉ-ENREGISTRÉS (SEC. 7)
+# ==============================================================================
+trial_data <- parsed_subjects %>%
+  mutate(
+    congruence = factor(if_else(speedcondition == "fast", "Match", "Mismatch"),
+                        levels = c("Match", "Mismatch")),
+    shape_correct = has_unexpected & (participant_response_shape == us_shape),
+    color_correct = has_unexpected & (participant_response_color == us_color),
+    size_correct  = has_unexpected & (participant_response_size  == us_size_mode),
+    all_features_correct = shape_correct & color_correct & size_correct,
+    detected_raw = if_else(participant_response_ib == "OUI", 1L, 0L)
+  )
+
+subject_summary <- trial_data %>%
+  group_by(
+    subject_id, is_bot_flag, variant, has_unexpected, us_shape, us_color,
+    us_size_mode, speedcondition, congruence, measured_refresh_rate,
+    participant_sex, participant_age, participant_prior_knowledge, n_focus_loss
+  ) %>%
+  summarise(
+    mean_acc_precrit = mean(accuracy_pct[trial_num %in% c(1, 2)], na.rm = TRUE),
+    acc_trial3       = accuracy_pct[trial_num == 3][1],
+    acc_trial4       = accuracy_pct[trial_num == 4][1],
+    max_drop_pct     = max(dropped_frames_pct, na.rm = TRUE),
+    det_t3           = detected_raw[trial_num == 3][1],
+    det_t4           = detected_raw[trial_num == 4][1],
+    det_t5           = detected_raw[trial_num == 5][1],
+    conf_det_t3      = confidence_detection[trial_num == 3][1],
+    resp_shape_t3    = participant_response_shape[trial_num == 3][1],
+    resp_color_t3    = participant_response_color[trial_num == 3][1],
+    resp_size_t3     = participant_response_size[trial_num == 3][1],
+    conf_shape_t3    = confidence_shape[trial_num == 3][1],
+    conf_color_t3    = confidence_color[trial_num == 3][1],
+    conf_size_t3     = confidence_size[trial_num == 3][1],
+    shape_ok_t3      = shape_correct[trial_num == 3][1],
+    color_ok_t3      = color_correct[trial_num == 3][1],
+    size_ok_t3       = size_correct[trial_num == 3][1],
+    all_ok_t3        = all_features_correct[trial_num == 3][1],
+    all_ok_t4        = all_features_correct[trial_num == 4][1],
+    all_ok_t5        = all_features_correct[trial_num == 5][1],
+    .groups = "drop"
+  ) %>%
+  mutate(
+    mean_acc_precrit = if_else(is.nan(mean_acc_precrit), NA_real_, mean_acc_precrit),
+    max_drop_pct     = if_else(is.infinite(max_drop_pct), 0, max_drop_pct),
+    
+    excl_bot        = is_bot_flag,
+    excl_minor      = is.na(participant_age) | participant_age == "Moins de 18 ans",
+    excl_technical  = is.na(measured_refresh_rate) |
+      (measured_refresh_rate < 56 | measured_refresh_rate > 64) |
+      (max_drop_pct > 5) | (n_focus_loss > 0),
+    excl_prior_know = is.na(participant_prior_knowledge) | participant_prior_knowledge == "Oui",
+    excl_accuracy   = is.na(mean_acc_precrit) | is.na(acc_trial3) |
+      (mean_acc_precrit < 80) | (acc_trial3 < 80),
+    excl_full_attn  = is.na(det_t5) | if_else(has_unexpected, det_t5 == 0L, det_t5 == 1L),
+    
+    is_valid_confirmatory = !(excl_bot | excl_minor | excl_technical |
+                                excl_prior_know | excl_accuracy | excl_full_attn)
+  )
+
+attrition_table <- tibble(
+  Step = c(
+    "0. Total sessions logged in Firebase",
+    "1. After Bot & Honeypot screening",
+    "2. After Age >= 18 verification",
+    "3. After Technical checks (60±4 Hz, <=5% drops, no blur)",
+    "4. After excluding Prior IB Knowledge",
+    "5. After Primary-task accuracy >= 80% (T1-T2 & T3)",
+    "6. Final Analytical Sample (Full-attention check)"
+  ),
+  N_Remaining = c(
+    nrow(subject_summary),
+    sum(!subject_summary$excl_bot),
+    sum(!subject_summary$excl_bot & !subject_summary$excl_minor),
+    sum(!subject_summary$excl_bot & !subject_summary$excl_minor & !subject_summary$excl_technical),
+    sum(!subject_summary$excl_bot & !subject_summary$excl_minor & !subject_summary$excl_technical & !subject_summary$excl_prior_know),
+    sum(!subject_summary$excl_bot & !subject_summary$excl_minor & !subject_summary$excl_technical & !subject_summary$excl_prior_know & !subject_summary$excl_accuracy),
+    sum(subject_summary$is_valid_confirmatory)
+  )
+) %>%
+  mutate(N_Excluded = lag(N_Remaining, default = first(N_Remaining)) - N_Remaining)
+
+print(kable(attrition_table, caption = "Sequential Attrition & Preregistered Exclusions"))
+
+clean_subjects <- subject_summary %>% filter(is_valid_confirmatory)
+clean_signal   <- clean_subjects %>% filter(has_unexpected)
+
+# ==============================================================================
+# 4. MODÈLE CONFIRMATOIRE 1 : RÉGRESSION LOGISTIQUE FACTORIELLE (H1, H2, H3)
+# ==============================================================================
+clean_signal <- clean_signal %>%
+  mutate(
+    c_congruence = if_else(congruence == "Match", 0.5, -0.5),
+    c_color      = if_else(us_color == "red", 0.5, -0.5),
+    c_shape      = if_else(us_shape == "triangle", 0.5, -0.5),
+    c_dynamics   = if_else(us_size_mode == "pulsing", 0.5, -0.5)
+  )
+
+m1_additive <- glm(
+  det_t3 ~ c_congruence + c_color + c_shape + c_dynamics,
+  data = clean_signal, family = binomial(link = "logit")
+)
+
+m1_interactive <- glm(
+  det_t3 ~ c_congruence * (c_color + c_shape + c_dynamics),
+  data = clean_signal, family = binomial(link = "logit")
+)
+
+cat("\n--- MODÈLE 1 : COMPARAISON ADDITIF VS INTERACTIF (LRT) ---\n")
+print(anova(m1_additive, m1_interactive, test = "Chisq"))
+print(broom::tidy(m1_interactive, exponentiate = TRUE, conf.int = TRUE))
+
+# ==============================================================================
+# 5. MODÈLE CONFIRMATOIRE 2 : SIGNAL DETECTION THEORY (H5 : d' ET CRITÈRE c)
+# ==============================================================================
+catch_data <- clean_subjects %>% filter(!has_unexpected)
+n_catch    <- nrow(catch_data)
+fa_count   <- sum(catch_data$det_t3 == 1L)
+fa_adj     <- (fa_count + 0.5) / (n_catch + 1)
+
+sdt_table <- clean_signal %>%
+  group_by(congruence, variant, us_shape, us_color, us_size_mode) %>%
+  summarise(
+    n_signal = n(),
+    hits     = sum(det_t3 == 1L),
+    hit_rate = hits / n_signal,
+    h_adj    = (hits + 0.5) / (n_signal + 1),
+    .groups  = "drop"
+  ) %>%
+  mutate(
+    fa_rate     = fa_count / n_catch,
+    fa_adj      = fa_adj,
+    d_prime     = qnorm(h_adj) - qnorm(fa_adj),
+    criterion_c = -0.5 * (qnorm(h_adj) + qnorm(fa_adj))
+  )
+
+cat("\n--- MODÈLE 2 : PARAMÈTRES SDT (d' ET CRITÈRE c) PAR CONDITION ---\n")
+print(kable(sdt_table %>% select(congruence, variant, n_signal, hit_rate, d_prime, criterion_c), digits = 3))
+
+t_crit  <- t.test(sdt_table$criterion_c, mu = 0, alternative = "greater")
+bf_crit <- BayesFactor::ttestBF(x = sdt_table$criterion_c, mu = 0, nullInterval = c(0, Inf))
+cat(sprintf("\nTest critère conservateur c > 0 : M = %.2f, t(%d) = %.2f, p = %.4f, BF10 = %.2f\n",
+            mean(sdt_table$criterion_c), t_crit$parameter, t_crit$statistic, t_crit$p.value,
+            extractBF(bf_crit)$bf[1]))
+
+# ==============================================================================
+# 6. MODÈLE CONFIRMATOIRE 3 : CAPTURE IMPLICITE SUR TÂCHE PRIMAIRE (H4)
+# ==============================================================================
+non_noticers_long <- trial_data %>%
+  filter(subject_id %in% clean_signal$subject_id[clean_signal$det_t3 == 0L]) %>%
+  filter(trial_num %in% c(1, 2, 3)) %>%
+  mutate(
+    phase = factor(if_else(trial_num %in% c(1, 2), "Baseline (T1-T2)", "Critical (T3)"),
+                   levels = c("Baseline (T1-T2)", "Critical (T3)"))
+  ) %>%
+  group_by(subject_id, congruence, phase) %>%
+  summarise(mean_accuracy = mean(accuracy_pct, na.rm = TRUE), .groups = "drop")
+
+m3_implicit <- lmer(mean_accuracy ~ phase * congruence + (1 | subject_id), data = non_noticers_long)
+cat("\n--- MODÈLE 3 : COÛT TÂCHE PRIMAIRE CHEZ LES NON-NOTICERS (LMM) ---\n")
+print(anova(m3_implicit))
+print(emmeans(m3_implicit, pairwise ~ phase | congruence))
+
+# ==============================================================================
+# 7. MODÈLE CONFIRMATOIRE 4 : EXTRACTION IMPLICITE & MÉTACOGNITION (H6)
+# ==============================================================================
+non_noticers_t3 <- clean_signal %>% filter(det_t3 == 0L)
+
+eval_subthreshold <- function(resp_vec, correct_vec, label) {
+  n_total   <- length(resp_vec)
+  n_escape  <- sum(resp_vec == "none", na.rm = TRUE)
+  n_forced  <- n_total - n_escape
+  n_correct <- sum(correct_vec[resp_vec != "none"], na.rm = TRUE)
+  binom_res <- binom.test(n_correct, n_forced, p = 0.50, alternative = "two.sided")
+  
+  tibble(
+    Feature          = label,
+    N_NonNoticers    = n_total,
+    Escape_None_Pct  = round(100 * n_escape / n_total, 1),
+    N_PhysicalChoice = n_forced,
+    Cond_Accuracy    = round(100 * n_correct / n_forced, 1),
+    CI_95_Low        = round(binom_res$conf.int[1] * 100, 1),
+    CI_95_High       = round(binom_res$conf.int[2] * 100, 1),
+    p_value          = binom_res$p.value
+  )
+}
+
+h6_accuracy_table <- bind_rows(
+  eval_subthreshold(non_noticers_t3$resp_shape_t3, non_noticers_t3$shape_ok_t3, "Shape (Circle vs Triangle)"),
+  eval_subthreshold(non_noticers_t3$resp_color_t3, non_noticers_t3$color_ok_t3, "Color (Black vs Red)"),
+  eval_subthreshold(non_noticers_t3$resp_size_t3,  non_noticers_t3$size_ok_t3,  "Size Dynamics (Fixed vs Pulsing)")
+)
+
+cat("\n--- MODÈLE 4a : SENSIBILITÉ RÉSIDUELLE CHEZ LES NON-NOTICERS (CHANCE = 50%) ---\n")
+print(kable(h6_accuracy_table, digits = 4))
+
+clean_signal <- clean_signal %>%
+  mutate(
+    noticer_status    = factor(if_else(det_t3 == 1L, "Noticer", "Non-Noticer")),
+    mean_feature_conf = rowMeans(across(c(conf_shape_t3, conf_color_t3, conf_size_t3)), na.rm = TRUE)
+  )
+
+welch_conf <- t.test(mean_feature_conf ~ noticer_status, data = clean_signal)
+bf_conf    <- BayesFactor::ttestBF(formula = mean_feature_conf ~ noticer_status, data = clean_signal)
+cat(sprintf("\nDissociation métacognitive (Confiance attributs) : Welch t(%.1f) = %.2f, p = %.4e, BF10 = %.2e\n",
+            welch_conf$parameter, welch_conf$statistic, welch_conf$p.value, extractBF(bf_conf)$bf[1]))
+
+# ==============================================================================
+# 8. PIPELINE MULTIVERSE (320 UNIVERS : 2 x 8 x 2 x 10) — SECTION 9
+# ==============================================================================
+mv_base <- subject_summary %>%
+  filter(!excl_bot, !excl_minor, !excl_technical, has_unexpected) %>%
+  mutate(congruence = factor(congruence, levels = c("Mismatch", "Match")))
+
+M <- multiverse()
+
+inside(M, {
+  df_mv <- mv_base %>%
+    filter(branch(prior_knowledge,
+                  "exclude_prior" ~ !excl_prior_know,
+                  "retain_all"    ~ TRUE)) %>%
+    filter(branch(accuracy_threshold,
+                  "no_filter" ~ TRUE,
+                  "ge_20pct"  ~ (!is.na(mean_acc_precrit) & !is.na(acc_trial3) & mean_acc_precrit >= 20 & acc_trial3 >= 20),
+                  "ge_30pct"  ~ (!is.na(mean_acc_precrit) & !is.na(acc_trial3) & mean_acc_precrit >= 30 & acc_trial3 >= 30),
+                  "ge_40pct"  ~ (!is.na(mean_acc_precrit) & !is.na(acc_trial3) & mean_acc_precrit >= 40 & acc_trial3 >= 40),
+                  "ge_50pct"  ~ (!is.na(mean_acc_precrit) & !is.na(acc_trial3) & mean_acc_precrit >= 50 & acc_trial3 >= 50),
+                  "ge_60pct"  ~ (!is.na(mean_acc_precrit) & !is.na(acc_trial3) & mean_acc_precrit >= 60 & acc_trial3 >= 60),
+                  "ge_70pct"  ~ (!is.na(mean_acc_precrit) & !is.na(acc_trial3) & mean_acc_precrit >= 70 & acc_trial3 >= 70),
+                  "ge_80pct"  ~ (!is.na(mean_acc_precrit) & !is.na(acc_trial3) & mean_acc_precrit >= 80 & acc_trial3 >= 80))) %>%
+    filter(branch(full_attention,
+                  "exclude_deniers" ~ !excl_full_attn,
+                  "retain_all"      ~ TRUE)) %>%
+    mutate(
+      detected_mv = branch(detection_criterion,
+                           "1_Say_YES_T3"     ~ as.integer(det_t3 == 1L),
+                           "2_Shape_T3"       ~ as.integer(det_t3 == 1L & shape_ok_t3),
+                           "3_Color_T3"       ~ as.integer(det_t3 == 1L & color_ok_t3),
+                           "4_Size_T3"        ~ as.integer(det_t3 == 1L & size_ok_t3),
+                           "5_Shape_Color_T3" ~ as.integer(det_t3 == 1L & shape_ok_t3 & color_ok_t3),
+                           "6_Shape_Size_T3"  ~ as.integer(det_t3 == 1L & shape_ok_t3 & size_ok_t3),
+                           "7_Color_Size_T3"  ~ as.integer(det_t3 == 1L & color_ok_t3 & size_ok_t3),
+                           "8_All_T3"         ~ as.integer(det_t3 == 1L & all_ok_t3),
+                           "9_All_T4"         ~ as.integer(det_t4 == 1L & all_ok_t4),
+                           "10_All_T5"        ~ as.integer(det_t5 == 1L & all_ok_t5))
+    )
+  
+  fit_mv <- glm(detected_mv ~ congruence, data = df_mv, family = binomial(link = "logit"))
+  res_mv <- broom::tidy(fit_mv, exponentiate = TRUE, conf.int = TRUE) %>%
+    filter(term == "congruenceMatch")
+})
+
+execute_multiverse(M)
+
+mv_results <- expand(M) %>%
+  mutate(
+    res = map(.results, ~ .x$res_mv),
+    n_u = map_int(.results, ~ nrow(.x$df_mv))
+  ) %>%
+  select(-.results, -.code, -.errors, -.parameter_assignment) %>%
+  unnest(res) %>%
+  arrange(estimate) %>%
+  mutate(
+    universe_rank = row_number(),
+    is_sig        = p.value < 0.05 & estimate > 1,
+    is_classic    = (prior_knowledge == "exclude_prior" &
+                       accuracy_threshold == "ge_80pct" &
+                       full_attention == "exclude_deniers" &
+                       detection_criterion == "1_Say_YES_T3")
+  )
+
+cat(sprintf("\n--- MULTIVERSE SUMMARY (320 UNIVERSES) ---\nSignificant (OR > 1, p < .05): %d / %d (%.1f%%) | Median OR = %.2f\n",
+            sum(mv_results$is_sig), nrow(mv_results),
+            100 * mean(mv_results$is_sig), median(mv_results$estimate)))
+
+# ==============================================================================
+# 9. VISUALISATIONS PUBLICATION-READY (STANDARDS BRM)
+# ==============================================================================
+
+fig_salience <- clean_subjects %>%
+  group_by(congruence, variant) %>%
+  summarise(
+    n = n(),
+    det_rate = mean(det_t3),
+    se = sqrt((det_rate * (1 - det_rate)) / n),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(x = reorder(variant, det_rate), y = det_rate, fill = congruence)) +
+  geom_col(position = position_dodge(0.8), width = 0.72, colour = "black", linewidth = 0.3) +
+  geom_errorbar(aes(ymin = pmax(0, det_rate - 1.96 * se), ymax = pmin(1, det_rate + 1.96 * se)),
+                position = position_dodge(0.8), width = 0.25, linewidth = 0.5) +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+  scale_fill_manual(values = c("Match" = "#2b5c8f", "Mismatch" = "#b8cce4"), name = "Attentional Set") +
+  coord_flip() +
+  labs(
+    title = "A. Explicit Detection Across Salience Variants and Attentional Set",
+    x = "Stimulus Variant", y = "Critical Trial Detection Rate (95% CI)"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(legend.position = "top", plot.title = element_text(face = "bold"))
+
+fig_spec_curve <- ggplot(mv_results, aes(x = universe_rank, y = estimate)) +
+  geom_hline(yintercept = 1, linetype = "dashed", colour = "grey40") +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), fill = "grey85", alpha = 0.6) +
+  geom_point(aes(colour = case_when(
+    is_classic ~ "Preregistered Baseline",
+    is_sig     ~ "Significant (p < .05)",
+    TRUE       ~ "Non-significant"
+  )), size = 1.6) +
+  scale_colour_manual(
+    values = c("Preregistered Baseline" = "#003366",
+               "Significant (p < .05)"  = "#c0392b",
+               "Non-significant"        = "#7f8c8d"),
+    name = "Pathway Status"
+  ) +
+  coord_cartesian(ylim = c(0.5, 6)) +
+  labs(
+    title = "B. Multiverse Specification Curve (320 Analytical Universes)",
+    subtitle = sprintf("Median OR = %.2f | %d/320 universes significant (p < .05)",
+                       median(mv_results$estimate), sum(mv_results$is_sig)),
+    x = "Analytical Universe (Ordered by Odds Ratio)",
+    y = "Congruence Odds Ratio (Match / Mismatch)"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(legend.position = "top", plot.title = element_text(face = "bold"))
+
+combined_brm_fig <- fig_salience / fig_spec_curve + plot_layout(heights = c(1.1, 1))
+print(combined_brm_fig)
+
+# ==============================================================================
+# 9.bis COMPLÉMENTS MULTIVERSE (SECTION 9.3 & 9.4 : ALLUVIAL & PERMUTATION)
+# ==============================================================================
+
+# 1. Diagramme Alluvial des flux de décision (Section 9.3)
+alluvial_data <- mv_results %>%
+  mutate(
+    pathway_type = case_when(
+      is_classic ~ "Preregistered Baseline",
+      is_sig     ~ "Significant (OR > 1, p < .05)",
+      TRUE       ~ "Non-significant"
+    ),
+    pathway_type = factor(pathway_type, levels = c(
+      "Non-significant", "Significant (OR > 1, p < .05)", "Preregistered Baseline"
+    ))
+  ) %>%
+  select(universe_rank, prior_knowledge, accuracy_threshold, full_attention, detection_criterion, pathway_type)
+
+fig_alluvial <- ggplot(
+  alluvial_data,
+  aes(
+    axis1 = prior_knowledge,
+    axis2 = accuracy_threshold,
+    axis3 = full_attention,
+    axis4 = detection_criterion
+  )
+) +
+  geom_alluvium(aes(fill = pathway_type, alpha = pathway_type), width = 0.35) +
+  geom_stratum(width = 0.35, fill = "grey94", colour = "grey40") +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), size = 2.6, lineheight = 0.85) +
+  scale_x_discrete(
+    limits = c("Prior Knowledge", "Accuracy Threshold", "Full Attention", "Detection Criterion"),
+    expand = c(0.08, 0.08)
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Non-significant"              = "#95a5a6",
+      "Significant (OR > 1, p < .05)" = "#c0392b",
+      "Preregistered Baseline"       = "#003366"
+    ),
+    name = "Analytical Pathway"
+  ) +
+  scale_alpha_manual(
+    values = c("Non-significant" = 0.35, "Significant (OR > 1, p < .05)" = 0.65, "Preregistered Baseline" = 0.95),
+    guide = "none"
+  ) +
+  labs(
+    title = "C. Alluvial Flow of Multiverse Decision Pathways (320 Universes)",
+    subtitle = "Dark blue = preregistered baseline; Red = significant congruence advantage (p < .05)",
+    y = "Number of Analytical Universes"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold"),
+    axis.line.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+print(fig_alluvial)
+
+# 2. Test de permutation non paramétrique du Multiverse (Section 9.4)
+# NB : Fixer N_PERMUTATIONS = 5000 pour l'analyse finale du manuscrit BRM
+N_PERMUTATIONS <- 500 
+
+run_multiverse_metrics <- function(df_input) {
+  # Évaluation vectorisée rapide des 320 univers pour les permutations
+  pk_opts  <- list(exclude_prior = !df_input$excl_prior_know, retain_all = rep(TRUE, nrow(df_input)))
+  acc_cuts <- c(0, 20, 30, 40, 50, 60, 70, 80)
+  fa_opts  <- list(exclude_deniers = !df_input$excl_full_attn, retain_all = rep(TRUE, nrow(df_input)))
+  det_cols <- list(
+    as.integer(df_input$det_t3 == 1L),
+    as.integer(df_input$det_t3 == 1L & df_input$shape_ok_t3),
+    as.integer(df_input$det_t3 == 1L & df_input$color_ok_t3),
+    as.integer(df_input$det_t3 == 1L & df_input$size_ok_t3),
+    as.integer(df_input$det_t3 == 1L & df_input$shape_ok_t3 & df_input$color_ok_t3),
+    as.integer(df_input$det_t3 == 1L & df_input$shape_ok_t3 & df_input$size_ok_t3),
+    as.integer(df_input$det_t3 == 1L & df_input$color_ok_t3 & df_input$size_ok_t3),
+    as.integer(df_input$det_t3 == 1L & df_input$all_ok_t3),
+    as.integer(df_input$det_t4 == 1L & df_input$all_ok_t4),
+    as.integer(df_input$det_t5 == 1L & df_input$all_ok_t5)
+  )
+  
+  is_match <- as.integer(df_input$congruence == "Match")
+  ors  <- numeric(320)
+  sigs <- logical(320)
+  u <- 1L
+  
+  for (pk in pk_opts) {
+    for (ac in acc_cuts) {
+      acc_ok <- if (ac == 0) rep(TRUE, nrow(df_input)) else (!is.na(df_input$mean_acc_precrit) & !is.na(df_input$acc_trial3) & df_input$mean_acc_precrit >= ac & df_input$acc_trial3 >= ac)
+      for (fa in fa_opts) {
+        keep <- pk & acc_ok & fa
+        x <- is_match[keep]
+        for (dc in det_cols) {
+          y <- dc[keep]
+          fit <- glm.fit(x = cbind(1, x), y = y, family = binomial())
+          b1  <- fit$coefficients[2]
+          se1 <- sqrt(diag(chol2inv(fit$qr$qr[1:2, 1:2])))[2]
+          z1  <- b1 / se1
+          ors[u]  <- exp(b1)
+          sigs[u] <- (b1 > 0) && (2 * pnorm(-abs(z1)) < 0.05)
+          u <- u + 1L
+        }
+      }
+    }
+  }
+  c(median_or = median(ors, na.rm = TRUE), prop_sig = mean(sigs, na.rm = TRUE))
+}
+
+obs_metrics <- run_multiverse_metrics(mv_base)
+
+perm_matrix <- replicate(N_PERMUTATIONS, {
+  df_perm <- mv_base
+  df_perm$congruence <- sample(df_perm$congruence)
+  run_multiverse_metrics(df_perm)
+})
+
+p_val_median_or <- (sum(perm_matrix["median_or", ] >= obs_metrics["median_or"]) + 1) / (N_PERMUTATIONS + 1)
+p_val_prop_sig  <- (sum(perm_matrix["prop_sig", ]  >= obs_metrics["prop_sig"])  + 1) / (N_PERMUTATIONS + 1)
+
+cat(sprintf("\n--- MULTIVERSE PERMUTATION TEST (%d RESAMPLES) ---\n", N_PERMUTATIONS))
+cat(sprintf("Observed Median OR = %.2f (Permutation p = %.4f)\n", obs_metrics["median_or"], p_val_median_or))
+cat(sprintf("Observed Share Significant = %.1f%% (Permutation p = %.4f)\n", 100 * obs_metrics["prop_sig"], p_val_prop_sig))
