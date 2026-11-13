@@ -1,0 +1,30 @@
+{
+  "title": "Preregistration: Benchmarking Dynamic Inattentional Blindness on the Web",
+  "description": "Locked preregistration protocol, factorial design (18 cells), confirmatory hypotheses (H1-H6), exclusion criteria, and R analysis pipeline for Study 2 (CER Toulouse approval n° 2026_1242).",
+  "upload_type": "publication",
+  "publication_type": "report",
+  "creators": [
+    {
+      "name": "Brochet, Émilien",
+      "affiliation": "Laboratoire CLLE, CNRS, Université Toulouse - Jean Jaurès"
+    },
+    {
+      "name": "Tardieu, Julien",
+      "affiliation": "Laboratoire CLLE, CNRS, Université Toulouse - Jean Jaurès"
+    },
+    {
+      "name": "Lemercier, Céline",
+      "affiliation": "Laboratoire CLLE, CNRS, Université Toulouse - Jean Jaurès"
+    }
+  ],
+  "keywords": [
+    "inattentional blindness",
+    "multiple object tracking",
+    "signal detection theory",
+    "attentional set",
+    "salience",
+    "preregistration",
+    "online experiment"
+  ],
+  "license": "MIT"
+}
